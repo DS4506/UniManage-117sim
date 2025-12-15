@@ -2,13 +2,13 @@ name: iOS CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ main ]
+    branches: [ "main" ]
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
       - name: Checkout repository
@@ -17,16 +17,75 @@ jobs:
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest
+          xcode-version: latest-stable
 
-      - name: List available Xcode schemes (debug help)
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: List schemes (debug help)
         run: xcodebuild -list -project UniManage.xcodeproj
 
-      - name: Build and run tests on Generic iOS Simulator
+      - name: Pick an available iOS Simulator (UDID)
+        id: pick_sim
         run: |
-          xcodebuild \
+          python3 - <<'PY'
+          import json, subprocess
+
+          # Get available devices in JSON
+          out = subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"], text=True)
+          data = json.loads(out)
+
+          # Prefer iPhone simulators
+          chosen = None
+          for runtime, devices in data.get("devices", {}).items():
+            for d in devices:
+              name = d.get("name", "")
+              if d.get("isAvailable") and "iPhone" in name:
+                chosen = (name, d["udid"], runtime)
+                break
+            if chosen:
+              break
+
+          # Fallback to any available iOS simulator device
+          if not chosen:
+            for runtime, devices in data.get("devices", {}).items():
+              for d in devices:
+                if d.get("isAvailable"):
+                  chosen = (d.get("name", "Unknown"), d["udid"], runtime)
+                  break
+              if chosen:
+                break
+
+          if not chosen:
+            raise SystemExit("No available simulators found on runner.")
+
+          name, udid, runtime = chosen
+          print(f"Chosen simulator: {name} ({runtime}) {udid}")
+
+          # Write outputs for GitHub Actions
+          with open("$GITHUB_OUTPUT", "a") as f:
+            f.write(f"udid={udid}\n")
+          PY
+
+      - name: Boot simulator
+        run: |
+          UDID="${{ steps.pick_sim.outputs.udid }}"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Build and run UNIT tests (stable for CI)
+        run: |
+          UDID="${{ steps.pick_sim.outputs.udid }}"
+          xcodebuild test \
             -project UniManage.xcodeproj \
             -scheme UniManage \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            test
+            -destination "id=$UDID" \
+            -only-testing:UniManageTests \
+            -resultBundlePath TestResults.xcresult
+
+      - name: Upload test results (xcresult)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults-xcresult
+          path: TestResults.xcresult
