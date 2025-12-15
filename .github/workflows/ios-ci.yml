@@ -1,4 +1,4 @@
-name: iOS CI
+name: iOS CI (UniManage)
 
 on:
   push:
@@ -8,10 +8,10 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Xcode
@@ -19,14 +19,70 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: List available simulators (debug help)
-        run: xcrun simctl list devices
+      - name: Show Xcode version
+        run: xcodebuild -version
 
-      - name: Build and run tests on iOS Simulator
+      - name: List schemes (debugging)
+        run: xcodebuild -list -project UniManage.xcodeproj
+
+      - name: List available runtimes and devices (debugging)
         run: |
+          xcrun simctl list runtimes
+          xcrun simctl list devicetypes
+          xcrun simctl list devices available
+
+      - name: Create and boot a CI iPhone Simulator
+        id: sim
+        run: |
+          set -e
+
+          # Pick the newest available iOS Simulator runtime on the runner
+          RUNTIME_ID=$(python3 - <<'PY'
+          import json, subprocess, re
+          data = json.loads(subprocess.check_output(["xcrun","simctl","list","runtimes","-j"], text=True))
+          ios = [r for r in data["runtimes"] if r.get("isAvailable") and "iOS" in r.get("name","") and "Simulator" in r.get("name","")]
+          def ver(r):
+            m = re.search(r"iOS\s+([0-9]+)\.([0-9]+)", r.get("name",""))
+            return (int(m.group(1)), int(m.group(2))) if m else (0,0)
+          ios.sort(key=ver)
+          print(ios[-1]["identifier"])
+          PY
+          )
+
+          # Prefer iPhone 15 if available, otherwise pick the newest iPhone type
+          DEVTYPE_ID=$(python3 - <<'PY'
+          import json, subprocess
+          data = json.loads(subprocess.check_output(["xcrun","simctl","list","devicetypes","-j"], text=True))
+          iphones = [d for d in data["devicetypes"] if "iPhone" in d.get("name","")]
+          preferred = [d for d in iphones if d.get("name") == "iPhone 15"]
+          pick = preferred[0] if preferred else iphones[-1]
+          print(pick["identifier"])
+          PY
+          )
+
+          UDID=$(xcrun simctl create "CI iPhone" "$DEVTYPE_ID" "$RUNTIME_ID")
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Build and run UNIT tests (stable for CI)
+        run: |
+          set -e
+          UDID="${{ steps.sim.outputs.udid }}"
+
           xcodebuild \
             -project UniManage.xcodeproj \
             -scheme UniManage \
             -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,name=iPhone 14,OS=latest" \
+            -destination "id=$UDID" \
+            -skip-testing:UniManageUITests \
+            -resultBundlePath TestResults.xcresult \
             clean test
+
+      - name: Upload test results (xcresult)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults
+          path: TestResults.xcresult
