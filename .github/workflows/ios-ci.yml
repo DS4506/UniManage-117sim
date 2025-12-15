@@ -1,82 +1,99 @@
-name: iOS CI (UniManage)
+name: iOS CI
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build-and-test:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: latest
 
       - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: List schemes (debugging)
-        run: xcodebuild -list -project UniManage.xcodeproj
-
-      - name: List available runtimes and devices (debugging)
         run: |
+          xcodebuild -version
+          swift --version
+
+      - name: List Xcode schemes (debugging help)
+        run: |
+          xcodebuild -list -project UniManage.xcodeproj
+
+      - name: Pick latest available iOS runtime + create simulator (UDID)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Available runtimes ==="
           xcrun simctl list runtimes
+
+          RUNTIME_ID=$(
+            xcrun simctl list runtimes |
+            grep -E "iOS .*com\.apple\.CoreSimulator\.SimRuntime\.iOS-" |
+            grep -v unavailable |
+            tail -n 1 |
+            sed -E 's/.*\((com\.apple\.CoreSimulator\.SimRuntime\.iOS-[^)]*)\).*/\1/'
+          )
+
+          if [[ -z "${RUNTIME_ID}" ]]; then
+            echo "ERROR: No available iOS simulator runtime found on this runner."
+            exit 1
+          fi
+
+          echo "Using runtime: ${RUNTIME_ID}"
+
+          echo "=== Available device types ==="
           xcrun simctl list devicetypes
-          xcrun simctl list devices available
 
-      - name: Create and boot a CI iPhone Simulator
-        id: sim
+          DEVICE_TYPE_ID=$(
+            xcrun simctl list devicetypes |
+            grep -E "iPhone" |
+            head -n 1 |
+            sed -E 's/.*\((com\.apple\.CoreSimulator\.SimDeviceType\.[^)]*)\).*/\1/'
+          )
+
+          if [[ -z "${DEVICE_TYPE_ID}" ]]; then
+            echo "ERROR: No iPhone simulator device type found."
+            exit 1
+          fi
+
+          echo "Using device type: ${DEVICE_TYPE_ID}"
+
+          UDID=$(xcrun simctl create "CI-iPhone" "${DEVICE_TYPE_ID}" "${RUNTIME_ID}")
+          echo "Created simulator UDID: ${UDID}"
+
+          echo "UDID=${UDID}" >> $GITHUB_ENV
+
+      - name: Boot simulator
+        shell: bash
         run: |
-          set -e
-
-          # Pick the newest available iOS Simulator runtime on the runner
-          RUNTIME_ID=$(python3 - <<'PY'
-          import json, subprocess, re
-          data = json.loads(subprocess.check_output(["xcrun","simctl","list","runtimes","-j"], text=True))
-          ios = [r for r in data["runtimes"] if r.get("isAvailable") and "iOS" in r.get("name","") and "Simulator" in r.get("name","")]
-          def ver(r):
-            m = re.search(r"iOS\s+([0-9]+)\.([0-9]+)", r.get("name",""))
-            return (int(m.group(1)), int(m.group(2))) if m else (0,0)
-          ios.sort(key=ver)
-          print(ios[-1]["identifier"])
-          PY
-          )
-
-          # Prefer iPhone 15 if available, otherwise pick the newest iPhone type
-          DEVTYPE_ID=$(python3 - <<'PY'
-          import json, subprocess
-          data = json.loads(subprocess.check_output(["xcrun","simctl","list","devicetypes","-j"], text=True))
-          iphones = [d for d in data["devicetypes"] if "iPhone" in d.get("name","")]
-          preferred = [d for d in iphones if d.get("name") == "iPhone 15"]
-          pick = preferred[0] if preferred else iphones[-1]
-          print(pick["identifier"])
-          PY
-          )
-
-          UDID=$(xcrun simctl create "CI iPhone" "$DEVTYPE_ID" "$RUNTIME_ID")
-          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
-
-          xcrun simctl boot "$UDID" || true
-          xcrun simctl bootstatus "$UDID" -b
+          set -euo pipefail
+          xcrun simctl boot "${UDID}" || true
+          xcrun simctl bootstatus "${UDID}" -b
+          xcrun simctl list devices | head -n 60
 
       - name: Build and run UNIT tests (stable for CI)
+        shell: bash
         run: |
-          set -e
-          UDID="${{ steps.sim.outputs.udid }}"
+          set -euo pipefail
 
           xcodebuild \
             -project UniManage.xcodeproj \
             -scheme UniManage \
             -sdk iphonesimulator \
-            -destination "id=$UDID" \
+            -destination "platform=iOS Simulator,id=${UDID}" \
             -skip-testing:UniManageUITests \
+            -enableCodeCoverage YES \
             -resultBundlePath TestResults.xcresult \
             clean test
 
@@ -84,5 +101,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TestResults
+          name: TestResults-xcresult
           path: TestResults.xcresult
+
