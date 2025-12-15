@@ -2,9 +2,9 @@ name: iOS CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main ]
 
 jobs:
   build-and-test:
@@ -19,11 +19,10 @@ jobs:
         with:
           xcode-version: latest
 
-      - name: List Xcode schemes (debug help)
-        run: |
-          xcodebuild -list -project UniManage.xcodeproj
+      - name: List available Xcode schemes (debug help)
+        run: xcodebuild -list -project UniManage.xcodeproj
 
-      - name: Build and run tests on iOS Simulator
+      - name: Build and run tests on Generic iOS Simulator
         run: |
           xcodebuild \
             -project UniManage.xcodeproj \
